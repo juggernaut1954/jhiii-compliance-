@@ -1,11 +1,30 @@
 import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ara_demo.db")
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+DATABASE_URL = os.environ["DATABASE_URL"]
 
-class Base(DeclarativeBase):
-    pass
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://", "postgresql+psycopg://", 1
+    )
+
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://", "postgresql+psycopg://", 1
+    )
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    connect_args={"sslmode": "require"}
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False
+)
+
+Base = declarative_base()
