@@ -3,6 +3,36 @@ import os
 import requests
 import streamlit as st
 
+import secrets
+
+DASHBOARD_PASSWORD = os.getenv("ARA_DASHBOARD_PASSWORD", "")
+
+if not DASHBOARD_PASSWORD:
+    st.error("Dashboard authentication is not configured.")
+    st.stop()
+
+if not st.session_state.get("authenticated", False):
+    st.title("JH III COMPLIANCE")
+    st.subheader("Secure Dashboard Access")
+
+    entered_password = st.text_input(
+        "Dashboard password",
+        type="password"
+    )
+
+    if st.button("Sign In"):
+        if secrets.compare_digest(
+            entered_password,
+            DASHBOARD_PASSWORD
+        ):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid password")
+
+    st.stop()
+
+
 st.set_page_config(
     page_title="JH III COMPLIANCE",
     page_icon="🛡️",
