@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, SessionLocal
@@ -24,7 +25,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="JH III Compliance ARA — Demonstration",
-    version="0.2.0",
+    version="version="0.3.0",
     lifespan=lifespan
 )
 
@@ -121,6 +122,7 @@ def list_entities(
     ]
 
 
+
 @app.post(
     "/obligations",
     status_code=201,
@@ -145,11 +147,30 @@ def create_obligation(
     )
 
     db.add(o)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+
+        constraint = getattr(
+            getattr(exc.orig, "diag", None),
+            "constraint_name",
+            None
+        )
+
+        if constraint == "uq_obligation_identity":
+            raise HTTPException(
+                status_code=409,
+                detail="This obligation already exists"
+            ) from exc
+
+        raise
+
     db.refresh(o)
 
     return obligation_out(o)
-
+        
 
 @app.get(
     "/obligations",
