@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="JH III Compliance ARA — Demonstration",
-    version="version="0.3.0",
+    version="0.3.0",
     lifespan=lifespan
 )
 
