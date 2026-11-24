@@ -1,5 +1,6 @@
 import os
 import secrets
+from fastapi.security import APIKeyHeader
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Depends, HTTPException
@@ -17,6 +18,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="JH III Compliance ARA — Demonstration", lifespan=lifespan)
 
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def require_api_key(api_key: str | None = Depends(api_key_header)):
+    expected_key = os.getenv("ARA_API_KEY")
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=503,
+            detail="API authentication is not configured"
+        )
+
+    if not api_key or not secrets.compare_digest(api_key, expected_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key"
+)
+   app.dependency_overrides  # Do not add this line                                              
 def db_session():
     with SessionLocal() as db:
         yield db
@@ -34,7 +52,7 @@ def obligation_out(o):
 def health():
     return {"status": "ok", "environment": "demo"}
 
-@app.post("/entities", status_code=201)
+@app.post("/entities", status_code=201, dependencies=[Depends(require_api_key)])
 def create_entity(data: EntityIn, db: Session = Depends(db_session)):
     e = Entity(**data.model_dump())
     db.add(e)
@@ -42,11 +60,12 @@ def create_entity(data: EntityIn, db: Session = Depends(db_session)):
     db.refresh(e)
     return entity_out(e)
 
-@app.get("/entities")
-def list_entities(db: Session = Depends(db_session)):
+@app.get("/entities", dependencies=[Depends(require_api_key)])
+def list_
+entities(db: Session = Depends(db_session)):
     return [entity_out(e) for e in db.scalars(select(Entity).order_by(Entity.id)).all()]
 
-@app.post("/obligations", status_code=201)
+@app.post("/obligations", status_code=201, dependencies=[Depends(require_api_key)])
 def create_obligation(data: ObligationIn, db: Session = Depends(db_session)):
     if not db.get(Entity, data.entity_id):
         raise HTTPException(404, "Entity not found")
@@ -57,7 +76,7 @@ def create_obligation(data: ObligationIn, db: Session = Depends(db_session)):
     db.refresh(o)
     return obligation_out(o)
 
-@app.post("/refresh")
+@app.post("/refresh", dependencies=[Depends(require_api_key)])
 def refresh(db: Session = Depends(db_session)):
     changed = 0
     for o in db.scalars(select(Obligation)).all():
@@ -68,12 +87,12 @@ def refresh(db: Session = Depends(db_session)):
     db.commit()
     return {"evaluated": db.query(Obligation).count(), "changed": changed}
 
-@app.get("/state_snapshot")
+@app.get("/state_snapshot", dependencies=[Depends(require_api_key)])
 def state_snapshot(db: Session = Depends(db_session)):
     return {"generated_at": datetime.now(timezone.utc).isoformat(),
             "obligations": [obligation_out(o) for o in db.scalars(select(Obligation).order_by(Obligation.id)).all()]}
 
-@app.get("/audit_export")
+@app.get("/audit_export", dependencies=[Depends(require_api_key)])
 def audit_export(db: Session = Depends(db_session)):
     return {"notice": "DEMONSTRATION ONLY — not regulator-certified or audit-ready",
             "generated_at": datetime.now(timezone.utc).isoformat(),
