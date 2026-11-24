@@ -1,44 +1,10 @@
 
+import json
 import os
-import requests
-import streamlit as st
-
 import secrets
 
-DASHBOARD_PASSWORD = os.getenv("ARA_DASHBOARD_PASSWORD", "")
-
-if not DASHBOARD_PASSWORD:
-    st.error("Dashboard authentication is not configured.")
-    st.stop()
-
-if not st.session_state.get("authenticated", False):
-    
-if st.sidebar.button("Sign Out"):
-    st.session_state.authenticated =
-False
-    st.rerun()
-    
-    st.title("JH III COMPLIANCE")
-    st.caption("ARA | Assurance · Risk · Automation")
-
-    st.subheader("Secure Dashboard Access")
-
-    entered_password = st.text_input(
-        "Dashboard password",
-        type="password"
-    )
-
-    if st.button("Sign In"):
-        if secrets.compare_digest(
-            entered_password,
-            DASHBOARD_PASSWORD
-        ):
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Invalid password")
-
-    st.stop()
+import requests
+import streamlit as st
 
 
 st.set_page_config(
@@ -53,15 +19,62 @@ API_URL = os.getenv(
 ).rstrip("/")
 
 API_KEY = os.getenv("ARA_API_KEY", "")
+DASHBOARD_PASSWORD = os.getenv("ARA_DASHBOARD_PASSWORD", "")
+
+
+# Dashboard authentication
+
+if not DASHBOARD_PASSWORD:
+    st.error("Dashboard authentication is not configured.")
+    st.stop()
+
+if not st.session_state.get("authenticated", False):
+    st.title("JH III COMPLIANCE")
+    st.caption("ARA | Assurance · Risk · Automation")
+    st.subheader("Secure Dashboard Access")
+
+    with st.form("login_form"):
+        entered_password = st.text_input(
+            "Dashboard password",
+            type="password"
+        )
+        submitted = st.form_submit_button("Sign In")
+
+    if submitted:
+        if secrets.compare_digest(
+            entered_password,
+            DASHBOARD_PASSWORD
+        ):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid password")
+
+    st.stop()
+
+
+# Sign out
+
+if st.sidebar.button("Sign Out"):
+    st.session_state.authenticated = False
+    st.rerun()
+
+
+# Dashboard
 
 st.title("JH III COMPLIANCE")
 st.caption("ARA | Assurance · Risk · Automation")
-st.warning("DEMONSTRATION — Not a regulatory compliance certification")
+
+st.warning(
+    "DEMONSTRATION — Not a regulatory compliance certification"
+)
 
 if not API_KEY:
     st.error("ARA_API_KEY is not configured.")
     st.stop()
 
+
+# Backend connection
 
 def api_request(method, endpoint, **kwargs):
     try:
@@ -74,10 +87,13 @@ def api_request(method, endpoint, **kwargs):
         )
         response.raise_for_status()
         return response.json()
-    except requests.RequestException as exc:
+
+    except (requests.RequestException, ValueError) as exc:
         st.error(f"API request failed: {exc}")
         return None
 
+
+# Load organizations
 
 entities = api_request("GET", "/entities")
 
@@ -100,6 +116,9 @@ selected = st.selectbox(
 
 entity_id = entity_options[selected]
 
+
+# Load obligations
+
 obligations = api_request(
     "GET",
     "/obligations",
@@ -119,6 +138,9 @@ overdue = sum(
     for o in obligations
 )
 
+
+# Executive metrics
+
 col1, col2, col3 = st.columns(3)
 
 col1.metric("Total obligations", len(obligations))
@@ -126,6 +148,9 @@ col2.metric("Pending", pending)
 col3.metric("Overdue", overdue)
 
 st.divider()
+
+
+# Assessment
 
 if st.button(
     "Run Compliance Assessment",
@@ -142,6 +167,9 @@ if st.button(
         )
         st.rerun()
 
+
+# Obligation table
+
 st.subheader("Compliance obligations")
 
 if obligations:
@@ -155,16 +183,23 @@ else:
 
 st.divider()
 
+
+# Demonstration report
+
 if st.button("Generate demonstration report"):
     report = api_request("GET", "/audit_export")
 
     if report is not None:
-        import json
+        st.session_state["demo_report"] = report
 
-        st.download_button(
-            "Download JSON report",
-            data=json.dumps(report, indent=2),
-            file_name="ara_demo_report.json",
-            mime="application/json"
-  )
-
+if "demo_report" in st.session_state:
+    st.download_button(
+        "Download JSON report",
+        data=json.dumps(
+            st.session_state["demo_report"],
+            indent=2
+        ),
+        file_name="ara_demo_report.json",
+        mime="application/json"
+    )
+    
