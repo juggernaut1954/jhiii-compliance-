@@ -14,10 +14,13 @@ if not DASHBOARD_PASSWORD:
 if not st.session_state.get("authenticated", False):
     
 if st.sidebar.button("Sign Out"):
-    st.session_state.authenticated = False
+    st.session_state.authenticated =
+False
     st.rerun()
     
     st.title("JH III COMPLIANCE")
+    st.caption("ARA | Assurance · Risk · Automation")
+
     st.subheader("Secure Dashboard Access")
 
     entered_password = st.text_input(
