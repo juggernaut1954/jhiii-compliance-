@@ -34,7 +34,7 @@ def require_api_key(api_key: str | None = Depends(api_key_header)):
             status_code=401,
             detail="Invalid or missing API key"
 )
-   app.dependency_overrides  # Do not add this line                                              
+    # Do not add this line                                              
 def db_session():
     with SessionLocal() as db:
         yield db
