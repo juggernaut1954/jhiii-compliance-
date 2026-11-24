@@ -61,8 +61,7 @@ def create_entity(data: EntityIn, db: Session = Depends(db_session)):
     return entity_out(e)
 
 @app.get("/entities", dependencies=[Depends(require_api_key)])
-def list_
-entities(db: Session = Depends(db_session)):
+def list_entities(db: Session = Depends(db_session)):
     return [entity_out(e) for e in db.scalars(select(Entity).order_by(Entity.id)).all()]
 
 @app.post("/obligations", status_code=201, dependencies=[Depends(require_api_key)])
