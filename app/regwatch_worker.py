@@ -17,8 +17,10 @@ SOURCE = "federal_register_fincen"
 
 def poll():
     engine = create_engine(
-        os.environ["DATABASE_URL"], pool_pre_ping=True
+        os.environ["DATABASE_URL"],
+        pool_pre_ping=True,
     )
+
     since = (
         datetime.now(timezone.utc) - timedelta(days=3)
     ).date().isoformat()
@@ -38,113 +40,126 @@ def poll():
         ],
     }
 
-    with engine.begin() as conn:
-        run_id = conn.execute(
-            text("""
-                INSERT INTO public.regulatory_poll_runs
-                    (source, status)
-                VALUES (:source, 'running')
-                RETURNING id
-            """),
-            {"source": SOURCE},
-        ).scalar_one()
-
     inserted = 0
     status = "error"
     error = None
 
     try:
-        for page in range(1, 6):
-            response = requests.get(
-                API,
-                params={**params, "page": page},
-                timeout=25,
-            )
-            response.raise_for_status()
-            payload = response.json()
-                        if not isinstance(payload, dict) or "results" not in payload:
-                raise RuntimeError(
-                    f"Unexpected Federal Register response: "
-                    f"{str(payload)[:1000]}"
+        with engine.begin() as conn:
+            run_id = conn.execute(
+                text("""
+                    INSERT INTO public.regulatory_poll_runs
+                        (source, status)
+                    VALUES (:source, 'running')
+                    RETURNING id
+                """),
+                {"source": SOURCE},
+            ).scalar_one()
+
+        try:
+            for page in range(1, 6):
+                response = requests.get(
+                    API,
+                    params={**params, "page": page},
+                    timeout=25,
                 )
+                response.raise_for_status()
+                payload = response.json()
 
-            records = payload["results"]
-
-            if not isinstance(records, list):
-                raise ValueError(
-                    "Federal Register results is not a list"
-                )
-
-            with engine.begin() as conn:
-                for doc in records:
-                    required = (
-                        "document_number",
-                        "title",
-                        "html_url",
+                if (
+                    not isinstance(payload, dict)
+                    or not isinstance(
+                        payload.get("results"), list
                     )
-                    if not all(doc.get(k) for k in required):
-                        raise ValueError(
-                            "Publication missing required fields"
+                ):
+                    raise RuntimeError(
+                        "Unexpected Federal Register response "
+                        f"(HTTP {response.status_code}): "
+                        f"{str(payload)[:1000]}"
+                    )
+
+                records = payload["results"]
+
+                with engine.begin() as conn:
+                    for doc in records:
+                        if (
+                            not isinstance(doc, dict)
+                            or not all(
+                                doc.get(k)
+                                for k in (
+                                    "document_number",
+                                    "title",
+                                    "html_url",
+                                )
+                            )
+                        ):
+                            raise ValueError(
+                                "Publication missing required fields: "
+                                f"{str(doc)[:300]}"
+                            )
+
+                        result = conn.execute(
+                            text("""
+                                INSERT INTO public.regulatory_events
+                                    (
+                                        source,
+                                        source_id,
+                                        title,
+                                        url,
+                                        publication_date,
+                                        document_type,
+                                        raw_metadata
+                                    )
+                                VALUES
+                                    (
+                                        :source,
+                                        :source_id,
+                                        :title,
+                                        :url,
+                                        :publication_date,
+                                        :document_type,
+                                        CAST(:raw_metadata AS jsonb)
+                                    )
+                                ON CONFLICT (source, source_id)
+                                DO NOTHING
+                                RETURNING id
+                            """),
+                            {
+                                "source": SOURCE,
+                                "source_id":
+                                    doc["document_number"],
+                                "title": doc["title"],
+                                "url": doc["html_url"],
+                                "publication_date":
+                                    doc.get("publication_date"),
+                                "document_type":
+                                    doc.get("type"),
+                                "raw_metadata":
+                                    json.dumps(doc),
+                            },
                         )
 
-                    result = conn.execute(
-                        text("""
-                            INSERT INTO public.regulatory_events
-                                (
-                                    source,
-                                    source_id,
-                                    title,
-                                    url,
-                                    publication_date,
-                                    document_type,
-                                    raw_metadata
-                                )
-                            VALUES
-                                (
-                                    :source,
-                                    :source_id,
-                                    :title,
-                                    :url,
-                                    :publication_date,
-                                    :document_type,
-                                    CAST(:raw_metadata AS jsonb)
-                                )
-                            ON CONFLICT (source, source_id)
-                            DO NOTHING
-                            RETURNING id
-                        """),
-                        {
-                            "source": SOURCE,
-                            "source_id":
-                                doc["document_number"],
-                            "title": doc["title"],
-                            "url": doc["html_url"],
-                            "publication_date":
-                                doc.get("publication_date"),
-                            "document_type":
-                                doc.get("type"),
-                            "raw_metadata":
-                                json.dumps(doc),
-                        },
+                        if (
+                            result.scalar_one_or_none()
+                            is not None
+                        ):
+                            inserted += 1
+
+                if (
+                    not records
+                    or page >= int(
+                        payload.get("total_pages", 1)
                     )
+                ):
+                    break
 
-                    if result.scalar_one_or_none() is not None:
-                        inserted += 1
+            status = "ok"
 
-            if (
-                not records
-                or page >= int(payload.get("total_pages", 1))
-            ):
-                break
+        except Exception as exc:
+            error = str(exc)[:1000]
+            raise
 
-        status = "ok"
-
-    except Exception as exc:
-        error = str(exc)[:1000]
-        raise
-
-    finally:
-        try:
+        finally:
             with engine.begin() as conn:
                 conn.execute(
                     text("""
@@ -162,8 +177,9 @@ def poll():
                         "id": run_id,
                     },
                 )
-        finally:
-            engine.dispose()
+
+    finally:
+        engine.dispose()
 
     print(
         f"Federal Register FinCEN poll complete: "
@@ -173,4 +189,4 @@ def poll():
 
 if __name__ == "__main__":
     poll()
-                
+    
