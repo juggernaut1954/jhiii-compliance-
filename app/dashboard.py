@@ -7,15 +7,75 @@ from datetime import date, datetime
 import requests
 import streamlit as st
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 st.set_page_config(page_title="JH III COMPLIANCE", page_icon="🛡️", layout="wide")
 logger = logging.getLogger(__name__)
+
 API_URL = os.getenv("ARA_API_URL", "https://jhiii-compliance.onrender.com").rstrip("/")
 API_KEY = os.getenv("ARA_API_KEY", "")
 DASHBOARD_PASSWORD = os.getenv("ARA_DASHBOARD_PASSWORD", "")
 REVIEWER_PASSWORD = os.getenv("ARA_REVIEWER_PASSWORD", "")
-DB_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+
+def connection_config():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is missing from the dashboard Render environment.")
+    try:
+        url = make_url(DATABASE_URL)
+    except Exception as exc:
+        raise ValueError("DATABASE_URL is not a valid SQLAlchemy PostgreSQL URL.") from exc
+    if url.drivername not in ("postgres", "postgresql", "postgresql+psycopg"):
+        raise ValueError("DATABASE_URL must use PostgreSQL and the psycopg driver.")
+    if not url.host or not url.database or not url.username:
+        raise ValueError("DATABASE_URL is missing a hostname, username, or database name.")
+    return url.set(drivername="postgresql+psycopg")
+
+
+@st.cache_resource(show_spinner=False)
+def get_engine():
+    return create_engine(
+        connection_config(),
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=1,
+        pool_timeout=15,
+        pool_recycle=1800,
+        connect_args={"sslmode": "require", "connect_timeout": 10},
+    )
+
+
+def database_error(exc, operation):
+    # Never display or log a connection string, password, or SQL parameters.
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    logger.error("ARA database %s failed: %s; SQLSTATE=%s", operation, type(exc).__name__, sqlstate or "unknown")
+    if sqlstate == "3D000":
+        st.error(
+            "Supabase rejected the requested database (SQLSTATE 3D000). "
+            "This cannot be corrected by changing Python driver settings. "
+            "Verify that this Render service uses the current Supabase Session Pooler "
+            "connection string for the intended project, including the project-specific "
+            "username, pooler host, port and database name. Do not create another database."
+        )
+    elif sqlstate == "28P01":
+        st.error("Supabase rejected database authentication (SQLSTATE 28P01). Check the dashboard's database credentials privately.")
+    else:
+        st.error(f"Database {operation} failed ({type(exc).__name__}). Check Render logs for the SQLSTATE diagnostic.")
+
+
+def db_read(sql, params=None):
+    try:
+        with get_engine().connect() as conn:
+            return [dict(row) for row in conn.execute(text(sql), params or {}).mappings().all()]
+    except (SQLAlchemyError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            st.error(str(exc))
+        else:
+            database_error(exc, "read")
+        return None
+
 
 if not DASHBOARD_PASSWORD:
     st.error("Dashboard authentication is not configured.")
@@ -66,32 +126,6 @@ def api_request(method, endpoint, **kwargs):
     except ValueError:
         logger.warning("ARA backend returned invalid JSON: %s %s", method, endpoint)
         st.error("Backend returned an invalid response.")
-        return None
-
-
-@st.cache_resource(show_spinner=False)
-def get_engine(database_url):
-    return create_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_size=2,
-        max_overflow=1,
-        pool_timeout=15,
-        pool_recycle=1800,
-        connect_args={"connect_timeout": 10},
-    )
-
-
-def db_read(sql, params=None):
-    if not DB_URL:
-        st.error("DATABASE_URL is missing from the dashboard service.")
-        return None
-    try:
-        with get_engine(DB_URL).connect() as conn:
-            return [dict(row) for row in conn.execute(text(sql), params or {}).mappings().all()]
-    except SQLAlchemyError as exc:
-        logger.exception("ARA database read failed")
-        st.error(f"Database read failed ({type(exc).__name__}). Check dashboard Render logs.")
         return None
 
 
@@ -257,11 +291,8 @@ def render_impact_assessment():
         if applicability == "applicable" and review != "reviewed":
             st.error("An 'applicable' determination must have a completed human review.")
             return
-        if not DB_URL:
-            st.error("DATABASE_URL is missing from the dashboard service.")
-            return
         try:
-            with get_engine(DB_URL).begin() as conn:
+            with get_engine().begin() as conn:
                 result = conn.execute(text("""
                     INSERT INTO public.regulatory_impact_assessments
                         (entity_id, regulatory_event_id, applicability, impact_level,
@@ -297,9 +328,11 @@ def render_impact_assessment():
                 })
                 assessment_id = result.scalar_one()
             st.success(f"Assessment #{assessment_id} saved to Supabase.")
-        except SQLAlchemyError as exc:
-            logger.exception("ARA impact assessment save failed")
-            st.error(f"Could not save assessment ({type(exc).__name__}). Check dashboard Render logs.")
+        except (SQLAlchemyError, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                st.error(str(exc))
+            else:
+                database_error(exc, "save")
 
     st.divider()
     st.subheader("Saved assessments for this organization")
@@ -363,4 +396,4 @@ with tab2:
     render_regulatory_intelligence()
 with tab3:
     render_impact_assessment()
-        
+    
