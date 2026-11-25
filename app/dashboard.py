@@ -109,6 +109,8 @@ if not API_KEY:
 
 
 def api_request(method, endpoint, **kwargs):
+    # Keep the existing API route and X-API-Key authentication unchanged.
+    # Report only safe HTTP diagnostics; never print credentials or response bodies.
     try:
         response = requests.request(
             method,
@@ -117,15 +119,30 @@ def api_request(method, endpoint, **kwargs):
             timeout=60,
             **kwargs,
         )
-        response.raise_for_status()
+        if not response.ok:
+            status = response.status_code
+            logger.warning("ARA backend HTTP %s for %s %s", status, method, endpoint)
+            if status == 401:
+                st.error(f"Backend returned HTTP 401 for {endpoint}: API key authentication failed. Verify ARA_API_KEY matches between the two Render services; do not share the value.")
+            elif status == 403:
+                st.error(f"Backend returned HTTP 403 for {endpoint}: access forbidden.")
+            elif status == 404:
+                st.error(f"Backend returned HTTP 404 for {endpoint}: endpoint not found. Verify ARA_API_URL points to the FastAPI service.")
+            elif status == 503:
+                st.error(f"Backend returned HTTP 503 for {endpoint}: service or authentication configuration unavailable.")
+            elif status >= 500:
+                st.error(f"Backend returned HTTP {status} for {endpoint}: server error. Inspect the FastAPI service logs.")
+            else:
+                st.error(f"Backend returned HTTP {status} for {endpoint}.")
+            return None
         return response.json()
     except requests.RequestException as exc:
-        logger.warning("ARA backend request failed: %s %s (%s)", method, endpoint, type(exc).__name__)
-        st.error(f"Backend request failed ({type(exc).__name__}). Check the FastAPI service in Render.")
+        logger.warning("ARA backend transport failure for %s %s: %s", method, endpoint, type(exc).__name__)
+        st.error(f"Backend connection failed for {endpoint} ({type(exc).__name__}).")
         return None
     except ValueError:
-        logger.warning("ARA backend returned invalid JSON: %s %s", method, endpoint)
-        st.error("Backend returned an invalid response.")
+        logger.warning("ARA backend returned invalid JSON for %s %s", method, endpoint)
+        st.error(f"Backend returned invalid JSON for {endpoint}.")
         return None
 
 
