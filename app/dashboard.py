@@ -1,7 +1,8 @@
 import json
+import logging
 import os
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 import requests
 import streamlit as st
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 st.set_page_config(page_title="JH III COMPLIANCE", page_icon="🛡️", layout="wide")
+logger = logging.getLogger(__name__)
 API_URL = os.getenv("ARA_API_URL", "https://jhiii-compliance.onrender.com").rstrip("/")
 API_KEY = os.getenv("ARA_API_KEY", "")
 DASHBOARD_PASSWORD = os.getenv("ARA_DASHBOARD_PASSWORD", "")
@@ -18,6 +20,7 @@ DB_URL = os.getenv("DATABASE_URL", "")
 if not DASHBOARD_PASSWORD:
     st.error("Dashboard authentication is not configured.")
     st.stop()
+
 if not st.session_state.get("authenticated", False):
     st.title("JH III COMPLIANCE")
     st.caption("ARA | Assurance · Risk · Automation")
@@ -39,6 +42,7 @@ if st.sidebar.button("Sign Out"):
 st.title("JH III COMPLIANCE")
 st.caption("ARA | Assurance · Risk · Automation")
 st.warning("DEMONSTRATION — Not a regulatory compliance certification")
+
 if not API_KEY:
     st.error("ARA_API_KEY is not configured.")
     st.stop()
@@ -47,31 +51,48 @@ if not API_KEY:
 def api_request(method, endpoint, **kwargs):
     try:
         response = requests.request(
-            method, f"{API_URL}{endpoint}",
-            headers={"X-API-Key": API_KEY}, timeout=60, **kwargs,
+            method,
+            f"{API_URL}{endpoint}",
+            headers={"X-API-Key": API_KEY},
+            timeout=60,
+            **kwargs,
         )
         response.raise_for_status()
         return response.json()
-    except (requests.RequestException, ValueError) as exc:
-        st.error(f"API request failed: {exc}")
+    except requests.RequestException as exc:
+        logger.warning("ARA backend request failed: %s %s (%s)", method, endpoint, type(exc).__name__)
+        st.error(f"Backend request failed ({type(exc).__name__}). Check the FastAPI service in Render.")
         return None
+    except ValueError:
+        logger.warning("ARA backend returned invalid JSON: %s %s", method, endpoint)
+        st.error("Backend returned an invalid response.")
+        return None
+
+
+@st.cache_resource(show_spinner=False)
+def get_engine(database_url):
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=2,
+        max_overflow=1,
+        pool_timeout=15,
+        pool_recycle=1800,
+        connect_args={"connect_timeout": 10},
+    )
 
 
 def db_read(sql, params=None):
-    engine = None
+    if not DB_URL:
+        st.error("DATABASE_URL is missing from the dashboard service.")
+        return None
     try:
-        if not DB_URL:
-            st.error("DATABASE_URL is missing from the dashboard service.")
-            return None
-        engine = create_engine(DB_URL, pool_pre_ping=True, connect_args={"connect_timeout": 10})
-        with engine.connect() as conn:
+        with get_engine(DB_URL).connect() as conn:
             return [dict(row) for row in conn.execute(text(sql), params or {}).mappings().all()]
     except SQLAlchemyError as exc:
-        st.error(f"Database read failed ({type(exc).__name__}). Check Render logs.")
+        logger.exception("ARA database read failed")
+        st.error(f"Database read failed ({type(exc).__name__}). Check dashboard Render logs.")
         return None
-    finally:
-        if engine is not None:
-            engine.dispose()
 
 
 def load_publications():
@@ -94,6 +115,7 @@ def render_regulatory_intelligence():
     if not records:
         st.info("No regulatory publications have been stored yet.")
         return
+
     c1, c2 = st.columns(2)
     c1.metric("Publications loaded", len(records))
     c2.metric("Awaiting review", sum((r.get("review_status") or "unreviewed") == "unreviewed" for r in records))
@@ -102,20 +124,32 @@ def render_regulatory_intelligence():
     statuses = sorted({str(r.get("review_status") or "unreviewed") for r in records})
     type_filter = st.selectbox("Publication type", ["All"] + types)
     status_filter = st.selectbox("Review status", ["All"] + statuses)
-    filtered = [r for r in records if
-                (not search or search.casefold() in (str(r.get("title") or "") + " " + str(r.get("source_id") or "")).casefold())
-                and (type_filter == "All" or str(r.get("document_type") or "Unknown") == type_filter)
-                and (status_filter == "All" or str(r.get("review_status") or "unreviewed") == status_filter)]
+    filtered = [
+        r for r in records
+        if (not search or search.casefold() in (
+            str(r.get("title") or "") + " " + str(r.get("source_id") or "")
+        ).casefold())
+        and (type_filter == "All" or str(r.get("document_type") or "Unknown") == type_filter)
+        and (status_filter == "All" or str(r.get("review_status") or "unreviewed") == status_filter)
+    ]
     st.caption(f"Showing {len(filtered)} of {len(records)} loaded publications (maximum 1,000).")
-    st.dataframe([{"Published": str(r.get("publication_date") or ""),
-                   "Title": r.get("title") or "", "Type": r.get("document_type") or "Unknown",
-                   "Review": r.get("review_status") or "unreviewed",
-                   "Document": r.get("source_id") or "", "Official link": r.get("url") or ""}
-                  for r in filtered], width="stretch", hide_index=True,
-                 column_config={"Official link": st.column_config.LinkColumn("Official link")})
+    st.dataframe(
+        [{
+            "Published": str(r.get("publication_date") or ""),
+            "Title": r.get("title") or "",
+            "Type": r.get("document_type") or "Unknown",
+            "Review": r.get("review_status") or "unreviewed",
+            "Document": r.get("source_id") or "",
+            "Official link": r.get("url") or "",
+        } for r in filtered],
+        width="stretch", hide_index=True,
+        column_config={"Official link": st.column_config.LinkColumn("Official link")},
+    )
     if filtered:
-        choice = st.selectbox("Inspect publication", range(len(filtered)),
-                              format_func=lambda i: f"{filtered[i]['source_id']} — {filtered[i]['title']}")
+        choice = st.selectbox(
+            "Inspect publication", range(len(filtered)),
+            format_func=lambda i: f"{filtered[i]['source_id']} — {filtered[i]['title']}",
+        )
         item = filtered[choice]
         st.markdown(f"**Document number:** {item['source_id']}")
         st.markdown(f"**Published:** {item['publication_date']}")
@@ -176,12 +210,13 @@ def render_impact_assessment():
             if secrets.compare_digest(reviewer_entry, REVIEWER_PASSWORD):
                 st.session_state.reviewer_authorized = True
                 st.rerun()
-            else:
-                st.error("Incorrect reviewer password")
+            st.error("Incorrect reviewer password")
         if existing:
             st.markdown("**Recorded assessment (read-only)**")
-            st.json({k: str(v) if isinstance(v, (date, datetime)) else v
-                     for k, v in existing.items()})
+            st.json({
+                k: str(v) if isinstance(v, (date, datetime)) else v
+                for k, v in existing.items()
+            })
         return
 
     if st.button("Lock reviewer editing"):
@@ -192,13 +227,23 @@ def render_impact_assessment():
     impact_options = ["undetermined", "low", "medium", "high", "critical"]
     review_options = ["unreviewed", "in_review", "reviewed"]
     current = existing or {}
+
+    def option_index(options, value, default):
+        return options.index(value) if value in options else options.index(default)
+
     with st.form("impact_assessment_form"):
-        applicability = st.selectbox("Applicability", applicability_options,
-                                     index=applicability_options.index(current.get("applicability", "not_assessed")))
-        impact = st.selectbox("Impact level", impact_options,
-                              index=impact_options.index(current.get("impact_level", "undetermined")))
-        review = st.selectbox("Review status", review_options,
-                              index=review_options.index(current.get("review_status", "unreviewed")))
+        applicability = st.selectbox(
+            "Applicability", applicability_options,
+            index=option_index(applicability_options, current.get("applicability"), "not_assessed"),
+        )
+        impact = st.selectbox(
+            "Impact level", impact_options,
+            index=option_index(impact_options, current.get("impact_level"), "undetermined"),
+        )
+        review = st.selectbox(
+            "Review status", review_options,
+            index=option_index(review_options, current.get("review_status"), "unreviewed"),
+        )
         rationale = st.text_area("Rationale and supporting reasoning", value=current.get("rationale") or "")
         action = st.text_area("Proposed action", value=current.get("proposed_action") or "")
         due = st.date_input("Action due date (optional)", value=current.get("action_due_date") or None)
@@ -212,10 +257,11 @@ def render_impact_assessment():
         if applicability == "applicable" and review != "reviewed":
             st.error("An 'applicable' determination must have a completed human review.")
             return
-        engine = None
+        if not DB_URL:
+            st.error("DATABASE_URL is missing from the dashboard service.")
+            return
         try:
-            engine = create_engine(DB_URL, pool_pre_ping=True, connect_args={"connect_timeout": 10})
-            with engine.begin() as conn:
+            with get_engine(DB_URL).begin() as conn:
                 result = conn.execute(text("""
                     INSERT INTO public.regulatory_impact_assessments
                         (entity_id, regulatory_event_id, applicability, impact_level,
@@ -238,18 +284,22 @@ def render_impact_assessment():
                                            THEN now() ELSE NULL END,
                         updated_at = now()
                     RETURNING id
-                """), {"entity_id": entity_id, "event_id": event_id,
-                         "applicability": applicability, "impact": impact,
-                         "review": review, "rationale": rationale.strip() or None,
-                         "action": action.strip() or None,
-                         "due": due, "reviewer": reviewer.strip() or None})
+                """), {
+                    "entity_id": entity_id,
+                    "event_id": event_id,
+                    "applicability": applicability,
+                    "impact": impact,
+                    "review": review,
+                    "rationale": rationale.strip() or None,
+                    "action": action.strip() or None,
+                    "due": due,
+                    "reviewer": reviewer.strip() or None,
+                })
                 assessment_id = result.scalar_one()
             st.success(f"Assessment #{assessment_id} saved to Supabase.")
         except SQLAlchemyError as exc:
-            st.error(f"Could not save assessment ({type(exc).__name__}). Check dashboard logs.")
-        finally:
-            if engine is not None:
-                engine.dispose()
+            logger.exception("ARA impact assessment save failed")
+            st.error(f"Could not save assessment ({type(exc).__name__}). Check dashboard Render logs.")
 
     st.divider()
     st.subheader("Saved assessments for this organization")
@@ -304,10 +354,13 @@ with tab1:
                 if report is not None:
                     st.session_state["demo_report"] = report
             if "demo_report" in st.session_state:
-                st.download_button("Download JSON report", data=json.dumps(st.session_state["demo_report"], indent=2),
-                                   file_name="ara_demo_report.json", mime="application/json")
+                st.download_button(
+                    "Download JSON report",
+                    data=json.dumps(st.session_state["demo_report"], indent=2),
+                    file_name="ara_demo_report.json", mime="application/json",
+                )
 with tab2:
     render_regulatory_intelligence()
 with tab3:
     render_impact_assessment()
-    
+        
