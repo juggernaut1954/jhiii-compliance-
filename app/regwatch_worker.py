@@ -62,13 +62,13 @@ def poll():
             )
             response.raise_for_status()
             payload = response.json()
-            if not isinstance(payload, dict) or "results" not in payload:
-    raise RuntimeError(
-        f"Unexpected Federal Register response: "
-        f"{str(payload)[:1000]}"
-    )
+                        if not isinstance(payload, dict) or "results" not in payload:
+                raise RuntimeError(
+                    f"Unexpected Federal Register response: "
+                    f"{str(payload)[:1000]}"
+                )
 
-records = payload["results"]
+            records = payload["results"]
 
             if not isinstance(records, list):
                 raise ValueError(
