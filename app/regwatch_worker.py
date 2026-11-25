@@ -22,7 +22,7 @@ def poll():
     )
 
     since = (
-        datetime.now(timezone.utc) - timedelta(days=3)
+        datetime.now(timezone.utc) - timedelta(days=365)
     ).date().isoformat()
 
     params = {
