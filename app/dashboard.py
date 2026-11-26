@@ -436,4 +436,112 @@ def render_audit_history():
         st.info("No audit entries match the selected filters.")
         return
 
-    selected_audit
+    selected_audit_id = st.selectbox(
+        "Inspect audit entry",
+        [r["id"] for r in filtered],
+        format_func=lambda audit_id: next(
+            f"Audit #{r['id']} — Assessment #{r['assessment_id']} — {r.get('operation')} — {r.get('occurred_at')}"
+            for r in filtered if r["id"] == audit_id
+        ),
+        key="audit_entry_select",
+    )
+    selected_record = next(r for r in filtered if r["id"] == selected_audit_id)
+    before = selected_record.get("previous_record")
+    after = selected_record.get("new_record")
+    if isinstance(before, str):
+        try:
+            before = json.loads(before)
+        except ValueError:
+            pass
+    if isinstance(after, str):
+        try:
+            after = json.loads(after)
+        except ValueError:
+            pass
+
+    st.markdown(f"**Database role:** {selected_record.get('database_role') or 'Not recorded'}")
+    st.markdown(f"**Claimed reviewer:** {selected_record.get('claimed_reviewer_name') or 'Not recorded'}")
+    if isinstance(before, dict) and isinstance(after, dict):
+        changed = [
+            {"Field": field, "Previous": str(before.get(field)), "Updated": str(after.get(field))}
+            for field in sorted(set(before) | set(after))
+            if before.get(field) != after.get(field)
+        ]
+        st.markdown("**Changed fields**")
+        if changed:
+            st.dataframe(changed, width="stretch", hide_index=True)
+        else:
+            st.info("No field-level differences found in these snapshots.")
+    elif before is None and isinstance(after, dict):
+        st.info("This entry contains a new record without a previous snapshot.")
+    elif after is None and isinstance(before, dict):
+        st.info("This entry contains a previous record without a new snapshot.")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Previous record**")
+        st.json(before)
+    with right:
+        st.markdown("**New record**")
+        st.json(after)
+
+    st.download_button(
+        "Download filtered audit history (JSON)",
+        data=json.dumps(filtered, indent=2, default=str),
+        file_name="ara_assessment_audit_history.json",
+        mime="application/json",
+        key="audit_download",
+    )
+    st.caption(
+        "This view reflects the existing audit table, not an immutable ledger. "
+        "It does not independently prove who made a change or detect privileged database tampering."
+    )
+
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Compliance Overview", "Regulatory Intelligence", "Impact Assessment", "Audit History"
+])
+with tab1:
+    entities = api_request("GET", "/entities")
+    if entities is None:
+        st.error("Could not load organizations.")
+    elif not entities:
+        st.info("No entities registered.")
+    else:
+        entity_options = {f"{e['name']} (ID {e['id']})": e["id"] for e in entities}
+        selected = st.selectbox("Select organization", list(entity_options))
+        obligations = api_request("GET", "/obligations", params={"entity_id": entity_options[selected]})
+        if obligations is not None:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total obligations", len(obligations))
+            c2.metric("Pending", sum(o["status"] == "pending" for o in obligations))
+            c3.metric("Overdue", sum(o["status"] == "overdue" for o in obligations))
+            st.divider()
+            if st.button("Refresh obligation deadlines", type="primary", width="stretch"):
+                result = api_request("POST", "/refresh")
+                if result is not None:
+                    st.success(f"Refresh completed. {result['evaluated']} evaluated; {result['changed']} changed.")
+                    st.rerun()
+            st.subheader("Compliance obligations")
+            if obligations:
+                st.dataframe(obligations, width="stretch", hide_index=True)
+            else:
+                st.info("No obligations for this organization.")
+            st.divider()
+            if st.button("Generate demonstration report"):
+                report = api_request("GET", "/audit_export")
+                if report is not None:
+                    st.session_state["demo_report"] = report
+            if "demo_report" in st.session_state:
+                st.download_button(
+                    "Download JSON report",
+                    data=json.dumps(st.session_state["demo_report"], indent=2),
+                    file_name="ara_demo_report.json", mime="application/json",
+                )
+with tab2:
+    render_regulatory_intelligence()
+with tab3:
+    render_impact_assessment()
+with tab4:
+    render_audit_history()
+
