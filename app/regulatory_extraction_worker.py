@@ -13,16 +13,20 @@ import requests
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
-PROMPT_VERSION = 'ara-rule-candidates-v1'
+PROMPT_VERSION = 'ara-rule-source-lines-v2'
 DEFAULT_MODEL = 'gpt-4.1-mini'
 MAX_DOCUMENT_CHARS = 20000
 MAX_OUTPUT_TOKENS = 6000
 MAX_CANDIDATES = 25
+MAX_EVIDENCE_CHARS = 2500
+MAX_EVIDENCE_LINES = 30
 LEGAL_EFFECTS = {'binding_candidate', 'proposed', 'informational', 'uncertain'}
 FIELDS = (
-    'title', 'requirement_text', 'source_section', 'evidence_quote',
+    'title', 'requirement_text', 'source_section', 'evidence_start_line',
+    'evidence_end_line',
     'suggested_legal_effect', 'potential_covered_parties', 'timing_details',
 )
+LINE_FIELDS = {'evidence_start_line', 'evidence_end_line'}
 NULLABLE = {'source_section', 'potential_covered_parties', 'timing_details'}
 SCHEMA = {
     'type': 'object',
@@ -34,6 +38,7 @@ SCHEMA = {
                 'properties': {
                     key: ({'type': 'string', 'enum': sorted(LEGAL_EFFECTS)}
                           if key == 'suggested_legal_effect' else
+                          {'type': 'integer'} if key in LINE_FIELDS else
                           {'type': ['string', 'null']} if key in NULLABLE else
                           {'type': 'string'})
                     for key in FIELDS
@@ -55,16 +60,30 @@ expired, delayed, amended or superseded; do not conclude current legal status
 or applicability to a specific institution. Label uncertain legal effect
 uncertain. Describe scope, conditions, exceptions and timing only when supported
 by the text; use null for unsupported optional fields. Do not invent deadlines.
-For each candidate provide a single contiguous verbatim evidence_quote copied
-exactly from the document, including spaces and line breaks, long enough to be
-unique in the document and to support the candidate. Never use ellipses or
-paraphrase in the quote. Use separate candidates for distinct actions. Return
-no more than 25 candidates. If none are supported, return an empty list.
+For each candidate identify a contiguous range of numbered source lines that
+contains the operative language supporting the claim. Return the one-based
+inclusive evidence_start_line and evidence_end_line; do not reproduce or
+paraphrase a quotation. Use the shortest sufficient range, no more than 30
+lines and 2500 characters. Include necessary conditions and exceptions in the
+candidate, or label uncertainty when the selected evidence is insufficient.
+Use separate candidates for distinct actions. Return no more than 25 candidates.
+If none are supported, return an empty list.
 All outputs are suggestions pending expert verification, not legal advice.'''
 
 
 class ExtractionError(Exception):
     """Only controlled error codes may be logged or saved."""
+
+
+def source_lines(body):
+    """Return source line text and exact offsets into the stored Unicode text."""
+    lines = []
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        end = offset + len(line)
+        lines.append((line, offset, end))
+        offset = end
+    return lines
 
 
 def request_candidates(document, model, api_key):
@@ -75,7 +94,11 @@ def request_candidates(document, model, api_key):
             'document_number': document['document_number'],
             'document_type': document['document_type'],
             'citation': document['citation'],
-            'document_text': document['document_text'],
+            'source_lines': [
+                {'line': i, 'text': line}
+                for i, (line, _, _) in enumerate(
+                    source_lines(document['document_text']), 1)
+            ],
         }, ensure_ascii=False),
         'store': False,
         'max_output_tokens': MAX_OUTPUT_TOKENS,
@@ -116,27 +139,43 @@ def validate_candidates(result, body):
         raise ExtractionError('invalid_candidate_count')
     validated = []
     seen = set()
-    for item in rows:
+    lines = source_lines(body)
+    for index, item in enumerate(rows, 1):
         if not isinstance(item, dict) or set(item) != set(FIELDS):
-            raise ExtractionError('invalid_candidate_fields')
+            raise ExtractionError(f'invalid_candidate_fields_{index}')
         for key, value in item.items():
+            if key in LINE_FIELDS:
+                if type(value) is not int:
+                    raise ExtractionError(f'invalid_evidence_line_{index}')
+                continue
             if value is None and key in NULLABLE:
                 continue
             if not isinstance(value, str) or not value.strip() or '\x00' in value:
-                raise ExtractionError('invalid_candidate_value')
+                raise ExtractionError(f'invalid_candidate_value_{index}')
         if item['suggested_legal_effect'] not in LEGAL_EFFECTS:
-            raise ExtractionError('invalid_legal_effect')
-        quote = item['evidence_quote']
-        start = body.find(quote)
-        if start < 0:
-            raise ExtractionError('evidence_not_in_source')
-        if body.find(quote, start + 1) >= 0:
-            raise ExtractionError('ambiguous_evidence_location')
-        signature = (item['title'], item['requirement_text'], quote)
+            raise ExtractionError(f'invalid_legal_effect_{index}')
+        first = item['evidence_start_line']
+        last = item['evidence_end_line']
+        if not (1 <= first <= last <= len(lines)):
+            raise ExtractionError(f'evidence_line_out_of_range_{index}')
+        if last - first + 1 > MAX_EVIDENCE_LINES:
+            raise ExtractionError(f'evidence_range_too_long_{index}')
+        start = lines[first - 1][1]
+        end = lines[last - 1][2]
+        # Trim only outside whitespace, preserving all internal source characters.
+        excerpt = body[start:end]
+        start += len(excerpt) - len(excerpt.lstrip())
+        end -= len(excerpt) - len(excerpt.rstrip())
+        if end <= start or end - start > MAX_EVIDENCE_CHARS:
+            raise ExtractionError(f'invalid_evidence_length_{index}')
+        quote = body[start:end]
+        signature = (item['title'], item['requirement_text'], start, end)
         if signature in seen:
-            raise ExtractionError('duplicate_candidate')
+            raise ExtractionError(f'duplicate_candidate_{index}')
         seen.add(signature)
-        validated.append(dict(item, evidence_start=start, evidence_end=start + len(quote)))
+        row = {k: v for k, v in item.items() if k not in LINE_FIELDS}
+        row.update(evidence_quote=quote, evidence_start=start, evidence_end=end)
+        validated.append(row)
     return validated
 
 
@@ -202,6 +241,10 @@ def extract(document_id):
                 if hashlib.sha256(body.encode('utf-8')).hexdigest() != doc['content_sha256']:
                     raise ExtractionError('stored_document_hash_mismatch')
                 result, usage = request_candidates(doc, model, key)
+                if isinstance(usage, dict):
+                    for field in ('input_tokens', 'output_tokens', 'total_tokens'):
+                        if isinstance(usage.get(field), int):
+                            print(f'{field}: {usage[field]}', flush=True)
                 rows = validate_candidates(result, body)
                 with conn.begin():
                     current = conn.execute(text('''
@@ -230,10 +273,6 @@ def extract(document_id):
                         WHERE id = :id
                     '''), {'id': run_id})
                 print(f'Extraction run {run_id}: {len(rows)} pending candidates', flush=True)
-                if isinstance(usage, dict):
-                    for field in ('input_tokens', 'output_tokens', 'total_tokens'):
-                        if isinstance(usage.get(field), int):
-                            print(f'{field}: {usage[field]}', flush=True)
             except Exception as exc:
                 code = error_code(exc)
                 try:
