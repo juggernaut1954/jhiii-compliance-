@@ -1,8 +1,13 @@
-
 name: ARA Regulatory Document Test
 
 on:
   workflow_dispatch:
+    inputs:
+      document_number:
+        description: "Federal Register document number"
+        required: true
+        default: "2026-12460"
+        type: string
 
 permissions:
   contents: read
@@ -11,6 +16,9 @@ jobs:
   document-retrieval:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
+    env:
+      DOCUMENT_NUMBER: ${{ inputs.document_number }}
 
     steps:
       - name: Checkout repository
@@ -26,12 +34,12 @@ jobs:
 
       - name: Test regulatory document worker
         run: |
-          python -m app.regulatory_document_worker 2026-00449
+          python -m app.regulatory_document_worker "$DOCUMENT_NUMBER"
 
       - name: Save retrieved regulatory document
         uses: actions/upload-artifact@v4
         with:
-          name: regulatory-document-2026-00449
-          path: federal_register_2026-00449.json
+          name: regulatory-document-${{ inputs.document_number }}
+          path: federal_register_${{ inputs.document_number }}.json
           if-no-files-found: error
           retention-days: 7
