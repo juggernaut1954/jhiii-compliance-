@@ -7,19 +7,18 @@ import hashlib
 import json
 import os
 import re
-import sys
 
 import requests
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
-PROMPT_VERSION = 'ara-rule-source-lines-v2'
+PROMPT_VERSION = 'ara-rule-source-lines-v3'
 DEFAULT_MODEL = 'gpt-4.1-mini'
 MAX_DOCUMENT_CHARS = 20000
 MAX_OUTPUT_TOKENS = 6000
 MAX_CANDIDATES = 25
-MAX_EVIDENCE_CHARS = 2500
-MAX_EVIDENCE_LINES = 30
+PREFERRED_EVIDENCE_CHARS = 2500
+PREFERRED_EVIDENCE_LINES = 30
 LEGAL_EFFECTS = {'binding_candidate', 'proposed', 'informational', 'uncertain'}
 FIELDS = (
     'title', 'requirement_text', 'source_section', 'evidence_start_line',
@@ -63,8 +62,10 @@ by the text; use null for unsupported optional fields. Do not invent deadlines.
 For each candidate identify a contiguous range of numbered source lines that
 contains the operative language supporting the claim. Return the one-based
 inclusive evidence_start_line and evidence_end_line; do not reproduce or
-paraphrase a quotation. Use the shortest sufficient range, no more than 30
-lines and 2500 characters. Include necessary conditions and exceptions in the
+paraphrase a quotation. Prefer the shortest sufficient range (at most 30
+lines and 2500 characters where feasible). If essential conditions require
+a longer contiguous range, include it rather than omitting legal context.
+Include necessary conditions and exceptions in the
 candidate, or label uncertainty when the selected evidence is insufficient.
 Use separate candidates for distinct actions. Return no more than 25 candidates.
 If none are supported, return an empty list.
@@ -158,15 +159,13 @@ def validate_candidates(result, body):
         last = item['evidence_end_line']
         if not (1 <= first <= last <= len(lines)):
             raise ExtractionError(f'evidence_line_out_of_range_{index}')
-        if last - first + 1 > MAX_EVIDENCE_LINES:
-            raise ExtractionError(f'evidence_range_too_long_{index}')
         start = lines[first - 1][1]
         end = lines[last - 1][2]
         # Trim only outside whitespace, preserving all internal source characters.
         excerpt = body[start:end]
         start += len(excerpt) - len(excerpt.lstrip())
         end -= len(excerpt) - len(excerpt.rstrip())
-        if end <= start or end - start > MAX_EVIDENCE_CHARS:
+        if end <= start or end - start > MAX_DOCUMENT_CHARS:
             raise ExtractionError(f'invalid_evidence_length_{index}')
         quote = body[start:end]
         signature = (item['title'], item['requirement_text'], start, end)
@@ -174,7 +173,18 @@ def validate_candidates(result, body):
             raise ExtractionError(f'duplicate_candidate_{index}')
         seen.add(signature)
         row = {k: v for k, v in item.items() if k not in LINE_FIELDS}
-        row.update(evidence_quote=quote, evidence_start=start, evidence_end=end)
+        broad = (last - first + 1 > PREFERRED_EVIDENCE_LINES
+                 or len(quote) > PREFERRED_EVIDENCE_CHARS)
+        review_notes = None
+        if broad:
+            review_notes = (
+                f'Automated quality flag: broad evidence range '
+                f'({last - first + 1} lines, {len(quote)} characters). '
+                'Reviewer must confirm supporting operative language and '
+                'narrow the evidence where possible before approval.'
+            )
+        row.update(evidence_quote=quote, evidence_start=start, evidence_end=end,
+                   review_notes=review_notes)
         validated.append(row)
     return validated
 
@@ -246,6 +256,8 @@ def extract(document_id):
                         if isinstance(usage.get(field), int):
                             print(f'{field}: {usage[field]}', flush=True)
                 rows = validate_candidates(result, body)
+                broad_count = sum(row['review_notes'] is not None for row in rows)
+                print(f'Validated candidates: {len(rows)}; broad evidence flags: {broad_count}', flush=True)
                 with conn.begin():
                     current = conn.execute(text('''
                         SELECT document_text, content_sha256
@@ -259,12 +271,12 @@ def extract(document_id):
                                 extraction_run_id, title, requirement_text, source_section,
                                 evidence_quote, evidence_start, evidence_end,
                                 suggested_legal_effect, potential_covered_parties,
-                                timing_details, review_status
+                                timing_details, review_status, review_notes
                             ) VALUES (
                                 :run_id, :title, :requirement_text, :source_section,
                                 :evidence_quote, :evidence_start, :evidence_end,
                                 :suggested_legal_effect, :potential_covered_parties,
-                                :timing_details, 'pending'
+                                :timing_details, 'pending', :review_notes
                             )
                         '''), dict(row, run_id=run_id))
                     conn.execute(text('''
@@ -298,7 +310,7 @@ def main():
     try:
         extract(args.document_id)
     except Exception as exc:
-        print(f'ARA extraction failed: {error_code(exc)}', file=sys.stderr, flush=True)
+        print(f'ARA extraction failed: {error_code(exc)}', flush=True)
         return 1
     return 0
 
