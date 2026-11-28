@@ -120,6 +120,43 @@ if st.session_state.get("ara_record_scope") == (entity, kind):
                     st.write(f"**{label}:** {str(value)[:1000]}")
 
 st.divider()
+st.subheader("Submit obligation evidence")
+st.caption("Evidence references and descriptions only. File upload and document custody are not yet enabled.")
+selected_membership = next((m for m in memberships if m.get("entity_id") == entity), {})
+roles = selected_membership.get("roles", [])
+if "evidence_contributor" in roles:
+    if st.button("Load my institution's obligations"):
+        obligations = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                           {"p_entity": int(entity), "p_kind": "obligations", "p_after": 0, "p_limit": 100})
+        if obligations is not None:
+            st.session_state["ara_obligations"] = obligations
+            st.session_state["ara_obligation_entity"] = entity
+    if st.session_state.get("ara_obligation_entity") == entity:
+        obligations = st.session_state.get("ara_obligations", [])
+        if not obligations:
+            st.info("No assigned obligations available.")
+        else:
+            choices = {str(o["id"]): o for o in obligations if o.get("id") is not None}
+            with st.form("submit_evidence", clear_on_submit=True):
+                assignment = st.selectbox("Obligation assignment ID", list(choices.keys()))
+                st.caption("Owner: " + str(choices[assignment].get("responsible_owner") or "Not assigned"))
+                reference = st.text_input("Evidence reference", max_chars=250,
+                                          placeholder="Internal document or case reference")
+                description = st.text_area("Evidence description", max_chars=2000)
+                submit = st.form_submit_button("Submit evidence", type="primary")
+            if submit:
+                if not reference.strip() or not description.strip():
+                    st.error("Both evidence fields are required.")
+                else:
+                    result = call("POST", "/rest/v1/rpc/ara_submit_assignment_evidence", token,
+                                  {"p_assignment": int(assignment), "p_reference": reference.strip(),
+                                   "p_description": description.strip()})
+                    if result is not None:
+                        st.success("Evidence submitted. Record ID: " + str(result))
+else:
+    st.info("Only an authorized evidence contributor can submit evidence for this institution.")
+
+st.divider()
 st.subheader("Pending regulatory candidate reviews")
 if st.button("Load pending queue", type="primary"):
     queue = call("POST", "/rest/v1/rpc/ara_pending_review_queue", token, {"p_limit": 25})
