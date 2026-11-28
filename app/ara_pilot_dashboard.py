@@ -246,7 +246,12 @@ if "independent_reviewer" in roles:
             assignment_record = assignment_map[assignment_id]
             current_status = str(assignment_record.get("completion_status") or "unknown")
             st.write("**Calculated current status:** " + current_status)
-            st.write("**Eligibility:** " + str(assignment_record.get("eligibility_status") or "unknown"))
+            if current_status == "evidence_recheck_required":
+                st.warning("Evidence recheck required: this obligation must not be treated as currently completed.")
+            elif current_status == "completed":
+                st.success("Completion recorded and current evidence checks satisfied. This is not regulatory certification.")
+            st.write("**Processing eligibility:** " + str(assignment_record.get("eligibility_status") or "unknown"))
+            st.caption("Eligibility means the obligation can be processed; it does not establish compliance.")
             evidence_by_id = {int(e["id"]): e for e in evidence}
             accepted = [
                 r for r in reviews
@@ -260,7 +265,7 @@ if "independent_reviewer" in roles:
             ]
             st.caption("Accepted evidence reviews shown from the first 100 records; the backend rechecks all conditions.")
             with st.form("obligation_decision_form"):
-                decision = st.selectbox("Decision", ["reopened", "completed"])
+                decision = st.selectbox("Decision", ["Select a decision", "reopened", "completed"])
                 if decision == "completed":
                     options = [int(r["id"]) for r in accepted]
                     review_id = st.selectbox("Accepted evidence review ID", options) if options else None
@@ -272,7 +277,9 @@ if "independent_reviewer" in roles:
                 confirmed = st.checkbox("I understand this decision will be recorded in the permanent audit history.")
                 submit_decision = st.form_submit_button("Record obligation decision")
             if submit_decision:
-                if not confirmed or not reason.strip():
+                if decision == "Select a decision":
+                    st.error("Select a decision before submitting.")
+                elif not confirmed or not reason.strip():
                     st.error("Confirmation and a written reason are required.")
                 elif decision == "completed" and review_id is None:
                     st.error("Completion requires an independently accepted evidence review.")
