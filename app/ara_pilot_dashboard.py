@@ -182,19 +182,25 @@ if "independent_reviewer" in roles:
                     st.write("Reference: " + str(item.get("evidence_reference")))
                     st.write("Description: " + str(item.get("description")))
                     with st.form("review_evidence_" + str(item.get("id"))):
-                        decision = st.selectbox("Decision", ["accepted", "rejected"])
+                        decision = st.selectbox("Decision", ["rejected", "accepted"], key="decision_" + str(item.get("id")))
                         reason = st.text_area("Review reason", max_chars=2000)
-                        confirmed = st.checkbox("I have independently verified this evidence.")
+                        if decision == "accepted":
+                            confirmed = st.checkbox("I have independently verified supporting evidence.")
+                        else:
+                            confirmed = True
+                            st.caption("Rejection does not require verifying the evidence. Explain why it cannot be accepted.")
                         submitted = st.form_submit_button("Record review decision")
                     if submitted:
-                        if not confirmed or not reason.strip():
-                            st.error("Independent verification and a reason are required.")
+                        if not reason.strip():
+                            st.error("A review reason is required.")
+                        elif not confirmed:
+                            st.error("Acceptance requires independent verification of supporting evidence.")
                         else:
                             result = call("POST", "/rest/v1/rpc/ara_review_assignment_evidence", token,
                                           {"p_evidence": int(item["id"]), "p_decision": decision,
                                            "p_reason": reason.strip()})
                             if result is not None:
-                                st.success("Review recorded. Audit-linked review ID: " + str(result))
+                                st.success("Review recorded. Review ID: " + str(result))
 else:
     st.info("Evidence decisions require a separately authorized independent reviewer.")
 
