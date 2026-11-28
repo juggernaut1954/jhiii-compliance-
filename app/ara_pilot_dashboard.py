@@ -157,6 +157,43 @@ else:
     st.info("Only an authorized evidence contributor can submit evidence for this institution.")
 
 st.divider()
+st.subheader("Independent evidence review")
+if "independent_reviewer" in roles:
+    if st.button("Load evidence awaiting review"):
+        evidence = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                        {"p_entity": int(entity), "p_kind": "evidence", "p_after": 0, "p_limit": 100})
+        if evidence is not None:
+            st.session_state["ara_review_evidence"] = evidence
+            st.session_state["ara_review_entity"] = entity
+    if st.session_state.get("ara_review_entity") == entity:
+        evidence = st.session_state.get("ara_review_evidence", [])
+        if not evidence:
+            st.info("No evidence submitted for this institution.")
+        else:
+            for item in evidence:
+                with st.container(border=True):
+                    st.write("**Evidence #" + str(item.get("id")) + "**")
+                    st.write("Assignment: " + str(item.get("assignment_id")))
+                    st.write("Reference: " + str(item.get("evidence_reference")))
+                    st.write("Description: " + str(item.get("description")))
+                    with st.form("review_evidence_" + str(item.get("id"))):
+                        decision = st.selectbox("Decision", ["accepted", "rejected"])
+                        reason = st.text_area("Review reason", max_chars=2000)
+                        confirmed = st.checkbox("I have independently verified this evidence.")
+                        submitted = st.form_submit_button("Record review decision")
+                    if submitted:
+                        if not confirmed or not reason.strip():
+                            st.error("Independent verification and a reason are required.")
+                        else:
+                            result = call("POST", "/rest/v1/rpc/ara_review_assignment_evidence", token,
+                                          {"p_evidence": int(item["id"]), "p_decision": decision,
+                                           "p_reason": reason.strip()})
+                            if result is not None:
+                                st.success("Review recorded. Audit-linked review ID: " + str(result))
+else:
+    st.info("Evidence decisions require a separately authorized independent reviewer.")
+
+st.divider()
 st.subheader("Pending regulatory candidate reviews")
 if st.button("Load pending queue", type="primary"):
     queue = call("POST", "/rest/v1/rpc/ara_pending_review_queue", token, {"p_limit": 25})
