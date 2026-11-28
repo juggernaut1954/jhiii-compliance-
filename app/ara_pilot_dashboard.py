@@ -220,6 +220,76 @@ if "independent_reviewer" in roles:
 else:
     st.info("Evidence decisions require a separately authorized independent reviewer.")
 
+
+st.divider()
+st.subheader("Obligation completion decisions")
+st.caption("Pilot workflow. Completion is permitted only when the backend validates independently accepted evidence.")
+if "independent_reviewer" in roles:
+    if st.button("Load obligation decision workspace"):
+        assignments = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                           {"p_entity": int(entity), "p_kind": "obligations", "p_after": 0, "p_limit": 100})
+        reviews = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                       {"p_entity": int(entity), "p_kind": "evidence_reviews", "p_after": 0, "p_limit": 100})
+        evidence = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                        {"p_entity": int(entity), "p_kind": "evidence", "p_after": 0, "p_limit": 100})
+        if assignments is not None and reviews is not None and evidence is not None:
+            st.session_state["ara_decision_workspace"] = (assignments, reviews, evidence)
+            st.session_state["ara_decision_entity"] = entity
+    if st.session_state.get("ara_decision_entity") == entity:
+        assignments, reviews, evidence = st.session_state["ara_decision_workspace"]
+        if not assignments:
+            st.info("No assignments available for this institution.")
+        else:
+            assignment_map = {int(a["id"]): a for a in assignments}
+            assignment_id = st.selectbox("Assignment to assess", list(assignment_map),
+                                         format_func=lambda aid: "Assignment #" + str(aid))
+            assignment_record = assignment_map[assignment_id]
+            current_status = str(assignment_record.get("completion_status") or "unknown")
+            st.write("**Calculated current status:** " + current_status)
+            st.write("**Eligibility:** " + str(assignment_record.get("eligibility_status") or "unknown"))
+            evidence_by_id = {int(e["id"]): e for e in evidence}
+            accepted = [
+                r for r in reviews
+                if r.get("decision") == "accepted"
+                and int(r.get("evidence_id", -1)) in evidence_by_id
+                and int(evidence_by_id[int(r["evidence_id"])].get("assignment_id", -1)) == assignment_id
+                and int(r["id"]) == max(
+                    int(x["id"]) for x in reviews
+                    if x.get("evidence_id") == r.get("evidence_id")
+                )
+            ]
+            st.caption("Accepted evidence reviews shown from the first 100 records; the backend rechecks all conditions.")
+            with st.form("obligation_decision_form"):
+                decision = st.selectbox("Decision", ["reopened", "completed"])
+                if decision == "completed":
+                    options = [int(r["id"]) for r in accepted]
+                    review_id = st.selectbox("Accepted evidence review ID", options) if options else None
+                    if not options:
+                        st.warning("No accepted evidence review available in the loaded records.")
+                else:
+                    review_id = None
+                reason = st.text_area("Decision reason", max_chars=2000)
+                confirmed = st.checkbox("I understand this decision will be recorded in the permanent audit history.")
+                submit_decision = st.form_submit_button("Record obligation decision")
+            if submit_decision:
+                if not confirmed or not reason.strip():
+                    st.error("Confirmation and a written reason are required.")
+                elif decision == "completed" and review_id is None:
+                    st.error("Completion requires an independently accepted evidence review.")
+                elif decision == "reopened" and current_status not in ("completed", "evidence_recheck_required"):
+                    st.error("Reopening is available only for assignments with an earlier completion.")
+                else:
+                    payload = {"p_assignment": int(assignment_id), "p_decision": decision,
+                               "p_reason": reason.strip(), "p_review": review_id}
+                    result = call("POST", "/rest/v1/rpc/ara_decide_assignment", token, payload)
+                    if result is not None:
+                        st.success("Obligation decision recorded. Decision ID: " + str(result))
+                        st.session_state.pop("ara_decision_workspace", None)
+                        st.session_state.pop("ara_decision_entity", None)
+                        st.info("Reload the workspace to see the recalculated status.")
+else:
+    st.info("Obligation completion decisions require an authorized independent reviewer.")
+
 st.divider()
 st.subheader("Pending regulatory candidate reviews")
 if st.button("Load pending queue", type="primary"):
