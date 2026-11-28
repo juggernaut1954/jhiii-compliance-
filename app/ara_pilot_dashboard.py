@@ -28,10 +28,32 @@ def call(method, path, token=None, payload=None, quiet=False):
                 st.error("Supabase rejected the sign-in. Check your credentials or use account recovery.")
             return None
         if response.status_code in (401, 403):
-            raise PermissionError("Authentication or permission denied")
+            if not quiet:
+                st.error("Access denied. Your account may lack the required institution permission or your session may have expired.")
+            return None
+        if not response.ok and path.startswith("/rest/v1/rpc/"):
+            try:
+                detail = response.json()
+                message = str(detail.get("message", "")) if isinstance(detail, dict) else ""
+            except ValueError:
+                message = ""
+            safe_messages = {
+                "Decision reason required": "A written decision reason is required.",
+                "Current independently accepted evidence required": "Completion requires current independently accepted evidence.",
+                "Already completed; reopen first": "This assignment is already completed. Reopen it before another completion.",
+                "Completed assignment required": "Only an assignment with a prior completion decision can be reopened.",
+                "Eligibility recheck required": "This obligation is not currently eligible for completion.",
+                "Independent reviewer role required": "An independent reviewer role is required.",
+                "Institution role required": "Your institution role does not permit this action.",
+                "Unauthorized institution": "Your account is not authorized for this institution.",
+                "Evidence already has a review decision; submit new evidence for reconsideration": "This evidence has already been reviewed. Submit new evidence for reconsideration.",
+            }
+            if not quiet:
+                st.error(safe_messages.get(message, "The database rejected this action. No successful decision was returned."))
+            return None
         response.raise_for_status()
         return response.json()
-    except (requests.RequestException, ValueError, PermissionError) as exc:
+    except (requests.RequestException, ValueError) as exc:
         if not quiet:
             st.error("Request failed: " + type(exc).__name__)
         return None
