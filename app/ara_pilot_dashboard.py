@@ -16,19 +16,24 @@ if not BASE.startswith("https://") or not KEY or not KEY.startswith("sb_publisha
     st.error("Configure SUPABASE_URL and a Supabase publishable key in Render.")
     st.stop()
 
-def call(method, path, token=None, payload=None):
+def call(method, path, token=None, payload=None, quiet=False):
     headers = {"apikey": KEY, "Content-Type": "application/json"}
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
         response = requests.request(method, BASE + path, headers=headers,
                                     json=payload, timeout=20)
+        if response.status_code in (400, 401, 403) and path.startswith("/auth/v1/token"):
+            if not quiet:
+                st.error("Supabase rejected the sign-in. Check your credentials or use account recovery.")
+            return None
         if response.status_code in (401, 403):
             raise PermissionError("Authentication or permission denied")
         response.raise_for_status()
         return response.json()
     except (requests.RequestException, ValueError, PermissionError) as exc:
-        st.error("Request failed: " + type(exc).__name__)
+        if not quiet:
+            st.error("Request failed: " + type(exc).__name__)
         return None
 
 st.markdown("""<style>
@@ -55,13 +60,13 @@ if not st.session_state.get("ara_token"):
         submitted = st.form_submit_button("Sign in")
     if submitted:
         result = call("POST", "/auth/v1/token?grant_type=password",
-                      payload={"email": email, "password": password})
+                      payload={"email": email.strip().lower(), "password": password}, quiet=True)
         if isinstance(result, dict) and result.get("access_token"):
             st.session_state.ara_token = result["access_token"]
             st.session_state.ara_refresh = result.get("refresh_token")
             st.rerun()
         else:
-            st.error("Sign-in failed. Verify account credentials.")
+            st.error("Supabase rejected this sign-in. Check the exact account email and password. If needed, use password recovery. Do not share passwords here.")
     st.stop()
 
 token = st.session_state.ara_token
