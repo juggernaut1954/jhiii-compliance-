@@ -167,40 +167,56 @@ if "independent_reviewer" in roles:
     if st.button("Load evidence awaiting review"):
         evidence = call("POST", "/rest/v1/rpc/ara_institution_records", token,
                         {"p_entity": int(entity), "p_kind": "evidence", "p_after": 0, "p_limit": 100})
-        if evidence is not None:
+        reviews = call("POST", "/rest/v1/rpc/ara_institution_records", token,
+                       {"p_entity": int(entity), "p_kind": "evidence_reviews", "p_after": 0, "p_limit": 100})
+        if evidence is not None and reviews is not None:
             st.session_state["ara_review_evidence"] = evidence
+            st.session_state["ara_review_history"] = reviews
             st.session_state["ara_review_entity"] = entity
     if st.session_state.get("ara_review_entity") == entity:
         evidence = st.session_state.get("ara_review_evidence", [])
-        if not evidence:
-            st.info("No evidence submitted for this institution.")
-        else:
-            for item in evidence:
-                with st.container(border=True):
-                    st.write("**Evidence #" + str(item.get("id")) + "**")
-                    st.write("Assignment: " + str(item.get("assignment_id")))
-                    st.write("Reference: " + str(item.get("evidence_reference")))
-                    st.write("Description: " + str(item.get("description")))
-                    with st.form("review_evidence_" + str(item.get("id"))):
-                        decision = st.selectbox("Decision", ["rejected", "accepted"], key="decision_" + str(item.get("id")))
-                        reason = st.text_area("Review reason", max_chars=2000)
-                        if decision == "accepted":
-                            confirmed = st.checkbox("I have independently verified supporting evidence.")
-                        else:
-                            confirmed = True
-                            st.caption("Rejection does not require verifying the evidence. Explain why it cannot be accepted.")
-                        submitted = st.form_submit_button("Record review decision")
-                    if submitted:
-                        if not reason.strip():
-                            st.error("A review reason is required.")
-                        elif not confirmed:
-                            st.error("Acceptance requires independent verification of supporting evidence.")
-                        else:
-                            result = call("POST", "/rest/v1/rpc/ara_review_assignment_evidence", token,
-                                          {"p_evidence": int(item["id"]), "p_decision": decision,
-                                           "p_reason": reason.strip()})
-                            if result is not None:
-                                st.success("Review recorded. Review ID: " + str(result))
+        reviews = st.session_state.get("ara_review_history", [])
+        reviewed_ids = {int(r["evidence_id"]) for r in reviews if r.get("evidence_id") is not None}
+        awaiting = [item for item in evidence if int(item["id"]) not in reviewed_ids]
+        st.caption(str(len(awaiting)) + " evidence submissions awaiting first review (first 100 records).")
+        if not awaiting:
+            st.info("No unreviewed evidence in the loaded records.")
+        for item in awaiting:
+            with st.container(border=True):
+                st.write("**Evidence #" + str(item.get("id")) + "**")
+                st.write("Assignment: " + str(item.get("assignment_id")))
+                st.write("Reference: " + str(item.get("evidence_reference")))
+                st.write("Description: " + str(item.get("description")))
+                with st.form("review_evidence_" + str(item.get("id"))):
+                    decision = st.selectbox("Decision", ["rejected", "accepted"], key="decision_" + str(item.get("id")))
+                    reason = st.text_area("Review reason", max_chars=2000)
+                    if decision == "accepted":
+                        confirmed = st.checkbox("I have independently verified supporting evidence.")
+                    else:
+                        confirmed = True
+                        st.caption("Rejection does not require verification. Explain why it cannot be accepted.")
+                    submitted = st.form_submit_button("Record review decision")
+                if submitted:
+                    if not reason.strip():
+                        st.error("A review reason is required.")
+                    elif not confirmed:
+                        st.error("Acceptance requires independent verification of supporting evidence.")
+                    else:
+                        result = call("POST", "/rest/v1/rpc/ara_review_assignment_evidence", token,
+                                      {"p_evidence": int(item["id"]), "p_decision": decision,
+                                       "p_reason": reason.strip()})
+                        if result is not None:
+                            st.success("Review recorded. Review ID: " + str(result))
+                            st.session_state.pop("ara_review_evidence", None)
+                            st.session_state.pop("ara_review_history", None)
+                            st.session_state.pop("ara_review_entity", None)
+                            st.info("Reload the queue to see updated review status.")
+        with st.expander("Previous review decisions (read-only)"):
+            if not reviews:
+                st.write("No review history in the loaded records.")
+            for r in reviews:
+                st.write("Evidence #" + str(r.get("evidence_id")) + " — " + str(r.get("decision")) + " — Review #" + str(r.get("id")))
+                st.caption(str(r.get("reason") or "No reason recorded"))
 else:
     st.info("Evidence decisions require a separately authorized independent reviewer.")
 
